@@ -9,7 +9,6 @@ class Model:
 github.com/tensorflow/tensorflow/blob/582c8d236cb079023657287c318ff26adb239002/tensorflow/python/keras/engine/training.py#L216
 '''
 
-from numpy.lib.function_base import extract
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, regularizers
@@ -19,7 +18,7 @@ import numpy as np
 assert float(tf.__version__[:3]) >= 2.2, "Requires TensorFlow 2.2 or later."
 
 # It seems there are two ways to subclass keras.Model
-# 1. Funcitonal style API where Model(inputs, outputs, name=...) can be replaced
+# 1. Funcitonal style API where Model(inputs, outputs, name=...) can be replaced 
 # by exactly CustomModel(inputs, outputs, name=...). No additional arguments possible
 # 2. Sub-classing which accepts any kind of arguments
 # I don't know if one is preferred over the other
@@ -27,40 +26,37 @@ assert float(tf.__version__[:3]) >= 2.2, "Requires TensorFlow 2.2 or later."
 
 class WrapModelL2SP(keras.Model):
     def __init__(self, *args, **kwargs):
+        
+
         super().__init__(*args, **kwargs)
-        self.reg_alpha = None
-        self.reg_beta = None
-        self.init_weights = None
+        # tf.identity is bad naming for deep copy operation
+        # https://github.com/tensorflow/tensorflow/issues/11186
+        self.train_vars_init = [tf.identity(a)
+                                for a in self.trainable_variables]
         self.iteration_counter = 0
+        self.reg_alpha = None
 
-    # note: get_config <--> from_config pair is too complicated
-    # for functional API path, which is different for straightforward (?) subclassing
-
+    # note: get_config <--> from_config pair is too complicated 
+    # for functional API path
+    
     def compile(self, *arg, **kwargs):
         """Configures the model for training.
-        reg_alpha: L2-SP weight decay rate for feature extractor layers
-        reg_beta: regular weight decay rate for final layers
-        init_weights: weights of the pre-trained feature extractor 
         """
         self.reg_alpha = kwargs.pop('reg_alpha')
-        self.reg_beta = kwargs.pop('reg_beta')
-        self.init_weights = kwargs.pop('init_weights')
         super().compile(*arg, **kwargs)
 
     def l2sp_regularization_loss(self):
-        feature_var_diffs = [(v - w) for v, w in zip(self.weights, self.init_weights)
-                             if v.trainable]
-        loss = self.reg_alpha * sum(tf.math.reduce_sum(tf.math.square(diff))
-                                    for diff in feature_var_diffs)
-        rest_of_vars = self.weights[len(self.init_weights):]
-        loss += self.reg_beta * sum(tf.math.reduce_sum(tf.math.square(v))
-                                    for v in rest_of_vars if v.trainable)
+        loss = 0
+        for current, init in zip(self.trainable_variables,
+                                 self.train_vars_init):
+            loss += self.reg_alpha * \
+                tf.math.reduce_sum(tf.math.square(current - init))
         return loss
 
-    def print_reg_loss(self, normal_loss, reg_loss):
-        print(f'losses {normal_loss, reg_loss}')
-        print('-' * 100)
-        print(f'{self.iteration_counter:3d}: {self.get_weights()}')
+    def set_weights(self, *args, **kwargs):
+        super().set_weights(*args, **kwargs)
+        self.train_vars_init = [tf.identity(a)
+                                for a in self.trainable_variables]
 
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
@@ -76,8 +72,10 @@ class WrapModelL2SP(keras.Model):
             reg_loss = self.l2sp_regularization_loss()
             loss = normal_loss + reg_loss
 
-        # if self.iteration_counter % 200 == 0:
-        #     self.print_reg_loss(normal_loss, reg_loss)
+        if self.iteration_counter % 200 == 0:
+            print(f'losses {normal_loss, reg_loss}')
+            print(f'{self.iteration_counter:3d}: train_vars_init \
+                {self.train_vars_init[0][:10]}')
         self.iteration_counter += 1
 
         # Compute gradients
@@ -91,54 +89,44 @@ class WrapModelL2SP(keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
 
-input_shape = (4,)
-inputs = layers.Input(shape=input_shape)
-features = layers.Dense(2, activation='relu')(inputs)
-extractor = Model(inputs, features)
-# extractor.trainable = False
-# set some known value for init weights
+inputs = layers.Input(shape=(32,))
+outputs = layers.Dense(1)(inputs)
+model = Model(inputs, outputs)
 
-def set_unity_weights(m):
-    init_weights = [np.ones_like(a) for a in m.get_weights()]
-    m.set_weights(init_weights)
-    return init_weights
+# Wrap an existing model -- you may or may not have model definition code
+model = WrapModelL2SP(model.inputs, model.outputs)
 
-init_weights = set_unity_weights(extractor)
+weights = model.get_weights()
 
-print('=' * 100)
-print(f'Initial weights: {init_weights}')
-
-
-inputs = layers.Input(shape=input_shape)
-# extractor.trainble = False 
-features = extractor(inputs)
-outputs = layers.Dense(1)(features)
-
-model = WrapModelL2SP(inputs, outputs)
-set_unity_weights(model)
+np.random.seed(1947)
+new_weights = [np.random.random(a.shape) for a in weights]
+model.set_weights(new_weights)
 
 
 def get_few_weights(m):
-    print('=' * 100)
-    return m.get_weights()
+    return m.get_weights()[0][:5]
 
 
-model.compile(optimizer="adam", loss="mse", 
-              reg_alpha=100, reg_beta=100, init_weights=init_weights)
+print(f'Initial weights: {get_few_weights(model)}')
+
+model.compile(optimizer="adam", loss="mse", metrics=["mae"],
+    reg_alpha=1)
 model.run_eagerly = True
 
-x = np.random.random((1000, ) + input_shape)
-y = np.dot(x, np.random.random(input_shape))
+# Just use `fit` as usual
+x = np.random.random((1000, 32))
+y = np.random.random((1000, 1))
 
 # printing compiled loss and metrics only, L2-SP loss value not yet logged above
-model.fit(x, y, epochs=100, validation_split=0.25)
+model.fit(x, y, epochs=1)
 
 print(f'Final weights: {get_few_weights(model)}')
 
 filename = 'model.h5'
 model.save(filename)
 
+del model
 
 model = load_model(filename, custom_objects={'WrapModelL2SP': WrapModelL2SP},
-                   compile=False)
+    compile=False)
 print(f'Reloaded weights: {get_few_weights(model)}')
