@@ -3,11 +3,13 @@ Inspired from
 https://github.com/holyseven/TransferLearningClassification
 https://keras.io/guides/customizing_what_happens_in_fit/
 https://towardsdatascience.com/tensorflow-2-2-and-a-custom-training-logic-16fa72934ac3
-
+# https://stackoverflow.com/a/62440411
 '''
 
 import tensorflow as tf
 from tensorflow import keras
+from tensorflow.keras import layers, regularizers
+from tensorflow.keras.models import Model, load_model
 import numpy as np
 
 assert float(tf.__version__[:3]) >= 2.2, "Requires TensorFlow 2.2 or later."
@@ -15,40 +17,34 @@ assert float(tf.__version__[:3]) >= 2.2, "Requires TensorFlow 2.2 or later."
 
 class WrapModelL2SP(keras.Model):
     def __init__(self, *args, **kwargs):
-        alpha = kwargs.pop('regularization_alpha')
         super().__init__(*args, **kwargs)
         # tf.identity is bad naming for deep copy operation
         # https://github.com/tensorflow/tensorflow/issues/11186
-        self.train_vars_init = [tf.identity(a) for a in self.trainable_variables]
+        self.train_vars_init = [tf.identity(a)
+                                for a in self.trainable_variables]
         self.iteration_counter = 0
-        self.regularization_alpha = alpha
-        # self.pre_weights = self.get_weights()
+        self.reg_alpha = None
 
-
-    # https://stackoverflow.com/a/62440411
-    def add_model_regularizer_loss(self):
-        loss=0
-        for l in self.layers:
-            if hasattr(l,'kernel_regularizer') and l.kernel_regularizer:
-                loss+=l.kernel_regularizer(l.kernel)
-            if hasattr(l,'bias_regularizer') and l.bias_regularizer:
-                loss+=l.bias_regularizer(l.bias)
-        return loss
-
+    # note: get_config <--> from_config pair is too complicated 
+    # for functional API path
+    
+    def compile(self, *arg, **kwargs):
+        reg_alpha = kwargs.pop('reg_alpha')
+        self.reg_alpha = reg_alpha
+        super().compile(*arg, **kwargs)
 
     def l2sp_regularization_loss(self):
         loss = 0
         for current, init in zip(self.trainable_variables,
-            self.train_vars_init):
-            loss += self.regularization_alpha * \
+                                 self.train_vars_init):
+            loss += self.reg_alpha * \
                 tf.math.reduce_sum(tf.math.square(current - init))
         return loss
 
-
     def set_weights(self, *args, **kwargs):
         super().set_weights(*args, **kwargs)
-        self.train_vars_init = [tf.identity(a) for a in self.trainable_variables]
-
+        self.train_vars_init = [tf.identity(a)
+                                for a in self.trainable_variables]
 
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
@@ -81,13 +77,12 @@ class WrapModelL2SP(keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
 
-inputs = keras.Input(shape=(32,))
-outputs = keras.layers.Dense(1)(inputs)
-model = keras.models.Model(inputs, outputs)
+inputs = layers.Input(shape=(32,))
+outputs = layers.Dense(1)(inputs)
+model = Model(inputs, outputs)
 
 # Wrap an existing model -- you may or may not have model definition code
-model = WrapModelL2SP(model.inputs, model.outputs,
-    regularization_alpha=1)
+model = WrapModelL2SP(model.inputs, model.outputs)
 
 weights = model.get_weights()
 
@@ -95,21 +90,31 @@ np.random.seed(1947)
 new_weights = [np.random.random(a.shape) for a in weights]
 model.set_weights(new_weights)
 
-def get_few_weights():
-    return model.get_weights()[0][:10]
 
-print(f'Initial weights: {get_few_weights()}')
+def get_few_weights(m):
+    return m.get_weights()[0][:5]
 
-model.compile(optimizer="adam", loss="mse", metrics=["mae"])
+
+print(f'Initial weights: {get_few_weights(model)}')
+
+model.compile(optimizer="adam", loss="mse", metrics=["mae"],
+    reg_alpha=1)
 model.run_eagerly = True
 
 # Just use `fit` as usual
 x = np.random.random((1000, 32))
 y = np.random.random((1000, 1))
 
-# printing compiled loss and metrics only, L2-SP loss value not yet logged above 
-model.fit(x, y, epochs=10)
+# printing compiled loss and metrics only, L2-SP loss value not yet logged above
+model.fit(x, y, epochs=1)
 
-print(f'Final weights: {get_few_weights()}')
+print(f'Final weights: {get_few_weights(model)}')
 
+filename = 'model.h5'
+model.save(filename)
 
+del model
+
+model = load_model(filename, custom_objects={'WrapModelL2SP': WrapModelL2SP},
+    compile=False)
+print(f'Reloaded weights: {get_few_weights(model)}')
