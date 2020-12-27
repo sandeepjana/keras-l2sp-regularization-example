@@ -30,7 +30,7 @@ class WrapModelL2SP(keras.Model):
         super().__init__(*args, **kwargs)
         self.reg_alpha = None
         self.reg_beta = None
-        self.init_weights = None
+        self.backbone_init_weights = None
         self.iteration_counter = 0
 
     # note: get_config <--> from_config pair is too complicated
@@ -40,19 +40,19 @@ class WrapModelL2SP(keras.Model):
         """Configures the model for training.
         reg_alpha: L2-SP weight decay rate for feature extractor layers
         reg_beta: regular weight decay rate for final layers
-        init_weights: weights of the pre-trained feature extractor 
+        backbone_init_weights: weights of the pre-trained feature extractor 
         """
         self.reg_alpha = kwargs.pop('reg_alpha')
         self.reg_beta = kwargs.pop('reg_beta')
-        self.init_weights = kwargs.pop('init_weights')
+        self.backbone_init_weights = kwargs.pop('backbone_init_weights')
         super().compile(*arg, **kwargs)
 
     def l2sp_regularization_loss(self):
-        feature_var_diffs = [(v - w) for v, w in zip(self.weights, self.init_weights)
+        feature_var_diffs = [(v - w) for v, w in zip(self.weights, self.backbone_init_weights)
                              if v.trainable]
         loss = self.reg_alpha * sum(tf.math.reduce_sum(tf.math.square(diff))
                                     for diff in feature_var_diffs)
-        rest_of_vars = self.weights[len(self.init_weights):]
+        rest_of_vars = self.weights[len(self.backbone_init_weights):]
         loss += self.reg_beta * sum(tf.math.reduce_sum(tf.math.square(v))
                                     for v in rest_of_vars if v.trainable)
         return loss
@@ -99,14 +99,14 @@ extractor = Model(inputs, features)
 # set some known value for init weights
 
 def set_unity_weights(m):
-    init_weights = [np.ones_like(a) for a in m.get_weights()]
-    m.set_weights(init_weights)
-    return init_weights
+    w = [np.ones_like(a) for a in m.get_weights()]
+    m.set_weights(w)
+    return w
 
-init_weights = set_unity_weights(extractor)
+backbone_init_weights = set_unity_weights(extractor)
 
 print('=' * 100)
-print(f'Initial weights: {init_weights}')
+print(f'Initial weights: {backbone_init_weights}')
 
 
 inputs = layers.Input(shape=input_shape)
@@ -124,7 +124,7 @@ def get_few_weights(m):
 
 
 model.compile(optimizer="adam", loss="mse", 
-              reg_alpha=100, reg_beta=100, init_weights=init_weights)
+              reg_alpha=100, reg_beta=100, backbone_init_weights=backbone_init_weights)
 model.run_eagerly = True
 
 x = np.random.random((1000, ) + input_shape)
